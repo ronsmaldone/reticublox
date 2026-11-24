@@ -3,6 +3,9 @@
 Design 3D-printable **node** and **linker** blocks that snap together with magnets into physical models of
 covalent organic frameworks (COFs) and metal–organic frameworks (MOFs).
 
+## Use it online
+**https://ronsmaldone.github.io/reticublox/** runs in any modern browser (Chrome, Edge, Firefox or Safari) on Mac, Windows or Linux, with nothing to install. Your parts and settings are saved in that browser.
+
 ## Download
 **Mac app (Apple Silicon):** download `Reticublox-mac-arm64.zip` from the [latest release](https://github.com/ronsmaldone/reticublox/releases/latest), unzip it and drag Reticublox to Applications. The first time, right-click the app and choose **Open**. Any other computer can run it from the source code; see below.
 
