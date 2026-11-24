@@ -6,7 +6,7 @@
 #   desktop/build-mac.sh            Apple Silicon (arm64) build
 #   desktop/build-mac.sh x64        Intel Mac build
 #
-# Output: dist/Reticublox.app and dist/Reticublox-mac-<arch>.zip
+# Output: dist/mac-<arch>/Reticublox.app and dist/Reticublox-mac-<arch>.zip
 set -euo pipefail
 
 ELECTRON_VERSION="${ELECTRON_VERSION:-33.2.1}"
@@ -26,13 +26,15 @@ if [ ! -f "$CACHE/$ZIP" ]; then
   mv "$CACHE/$ZIP.part" "$CACHE/$ZIP"
 fi
 
-APP="$DIST/Reticublox.app"
-rm -rf "$APP" "$DIST/Electron.app"
-ditto -x -k "$CACHE/$ZIP" "$DIST"
-mv "$DIST/Electron.app" "$APP"
+OUTDIR="$DIST/mac-$ARCH"
+APP="$OUTDIR/Reticublox.app"
+rm -rf "$OUTDIR"
+mkdir -p "$OUTDIR"
+ditto -x -k "$CACHE/$ZIP" "$OUTDIR"
+mv "$OUTDIR/Electron.app" "$APP"
 # Electron's and Chromium's licence notices travel inside the app
-mv "$DIST/LICENSE" "$DIST/LICENSES.chromium.html" "$APP/Contents/Resources/"
-rm -f "$DIST/version"
+mv "$OUTDIR/LICENSE" "$OUTDIR/LICENSES.chromium.html" "$APP/Contents/Resources/"
+rm -f "$OUTDIR/version"
 
 # the web app goes in Contents/Resources/app (Electron loads it instead of its default app)
 RES="$APP/Contents/Resources"

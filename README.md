@@ -7,7 +7,7 @@ covalent organic frameworks (COFs) and metal–organic frameworks (MOFs).
 **https://ronsmaldone.github.io/reticublox/** runs in any modern browser (Chrome, Edge, Firefox or Safari) on Mac, Windows or Linux, with nothing to install. Your parts and settings are saved in that browser.
 
 ## Download
-**Mac app (Apple Silicon):** download `Reticublox-mac-arm64.zip` from the [latest release](https://github.com/ronsmaldone/reticublox/releases/latest), unzip it and drag Reticublox to Applications. The first time, right-click the app and choose **Open**. Any other computer can run it from the source code; see below.
+**Mac app:** download `Reticublox-mac-arm64.zip` (Apple Silicon, M1 and later) or `Reticublox-mac-x64.zip` (Intel Macs) from the [latest release](https://github.com/ronsmaldone/reticublox/releases/latest), unzip it and drag Reticublox to Applications. The first time, right-click the app and choose **Open**. Any other computer can run it from the source code; see below.
 
 ## Run it
 
@@ -19,13 +19,20 @@ python3 serve.py
 This opens http://localhost:8765 in your browser. Everything runs locally. The libraries are in `vendor/`, so you don't need an internet connection. Opening `index.html` directly (`file://`) won't work, because WebAssembly modules need to be served over HTTP.
 
 ## Desktop app (Mac)
-`dist/Reticublox.app` is a standalone Mac app. It doesn't need Python, a server or an internet connection: drag it to Applications and open it like any other app. To share it, send `dist/Reticublox-mac-arm64.zip`, which is for Apple Silicon Macs (M1 and later).
+`desktop/build-mac.sh` builds a standalone Mac app. It doesn't need Python, a server or an internet connection: drag it to Applications and open it like any other app. There are two builds, each with a zip for sharing:
+
+| Mac | App | Zip |
+|---|---|---|
+| Apple Silicon (M1 and later) | `dist/mac-arm64/Reticublox.app` | `dist/Reticublox-mac-arm64.zip` |
+| Intel | `dist/mac-x64/Reticublox.app` | `dist/Reticublox-mac-x64.zip` |
+
+To see which one a Mac needs, open  → About This Mac: **Chip** means Apple Silicon and **Processor** means Intel. The Intel build also runs on Apple Silicon through Rosetta, but more slowly.
 
 - **First launch:** the app is signed ad hoc, not with a paid Apple Developer ID, so macOS says it's from an unidentified developer. Right-click the app and choose **Open**, then **Open** again. You only need to do this once per Mac. If macOS says the app "is damaged", run `xattr -cr /Applications/Reticublox.app` once; this happens to apps downloaded through some browsers or mail clients.
 - **Saved work:** the app keeps its own parts and settings, separate from the browser version.
 - **Rebuilding after changes to the web app:** run `desktop/build-mac.sh`, or `desktop/build-mac.sh x64` for Intel Macs.
   - The first build downloads Electron's prebuilt Mac app (about 105 MB) from GitHub into `desktop/.cache/`. Node.js isn't needed.
-  - To check a fresh build without opening a window, run `RETICUBLOX_SELFTEST=1 dist/Reticublox.app/Contents/MacOS/Reticublox`.
+  - To check a fresh build without opening a window, run `RETICUBLOX_SELFTEST=1 dist/mac-arm64/Reticublox.app/Contents/MacOS/Reticublox`.
 - **Files:** `desktop/main.cjs` is the app window. It serves the files from inside the app on a private `app://` address, because WebAssembly needs a real origin. `desktop/icon.svg` and `desktop/icon.icns` are the app icon.
 
 ## Building a model in four steps
