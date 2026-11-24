@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Reticublox Builder</title>
+  <link rel="stylesheet" href="css/style.css">
+  <script type="importmap">{ "imports": { "three": "./vendor/three.module.js" } }</script>
+  <script src="vendor/RDKit_minimal.js"></script>
+  <script src="vendor/jszip.min.js"></script>
+</head>
+<body>
+  <header>
+    <div class="brand"><span class="logo">⬡</span> Reticublox <small>magnetic node &amp; linker blocks for COF / MOF models</small></div>
+    <div id="status" class="status">Loading geometry engine…</div>
+  </header>
+
+  <main>
+    <!-- LEFT: four-step builder (rendered by js/main.js) -->
+    <section class="panel left" id="wizard" aria-label="Builder"></section>
+
+    <!-- CENTRE: viewer -->
+    <section class="viewer-wrap">
+      <div class="viewbar">
+        <div class="seg" id="viewMode">
+          <button data-v="block" class="on">Block</button>
+          <button data-v="assembly">Assembled model</button>
+        </div>
+        <label class="inline" id="repsWrap">Size
+          <select id="asmReps"><option value="1">1 cell</option><option value="2">2 cells</option><option value="3">3 cells</option><option value="4">4 cells</option></select>
+        </label>
+        <span id="viewInfo" class="viewinfo"></span>
+      </div>
+      <div id="viewer"></div>
+      <div id="warnings" class="warnings"></div>
+    </section>
+
+    <!-- RIGHT: parts, bill of materials, print settings -->
+    <section class="panel right">
+      <h2>Parts to print</h2>
+      <ul id="partsList" class="parts"></ul>
+      <div class="row">
+        <button id="dlAll" class="primary">Download all (ZIP)</button>
+        <button id="clearParts" class="ghost">Clear</button>
+      </div>
+      <div id="bom" class="info"></div>
+
+      <details id="printDetails">
+        <summary>Print &amp; magnet settings</summary>
+        <div id="printForm" class="grid2"></div>
+        <button class="primary" id="applyPrint">Apply to all parts</button>
+        <p class="hint">Measure your magnets with calipers. 6 × 3 mm N52 discs with 0.10–0.20 mm clearance suit most FDM printers (press-fit, or add a drop of CA glue).</p>
+      </details>
+    </section>
+  </main>
+
+  <dialog id="drawDlg">
+    <div class="dlg-head"><b>Draw a building block</b><span class="hint">Leave the reactive groups on (CHO, NH₂, COOH, B(OH)₂…) — they are detected automatically — or draw R-group / “*” atoms at the connection points.</span></div>
+    <div id="jsmeHost"></div>
+    <div class="row end">
+      <button id="drawCancel" class="ghost">Cancel</button>
+      <button id="drawUse" class="primary">Use this structure</button>
+    </div>
+  </dialog>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

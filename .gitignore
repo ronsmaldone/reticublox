@@ -1,0 +1,4 @@
+# build output (the Mac app zip goes on GitHub Releases, not in the repository)
+dist/
+desktop/.cache/
+.DS_Store
