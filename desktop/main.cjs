@@ -54,7 +54,8 @@ function selfTest(win) {
         const i3 = imp.importStructure(xyz, 't.xyz').molblock.includes('M  END');
         const sc = document.createElement('script'); sc.src = 'vendor/jsme/jsme.nocache.js'; document.body.append(sc);
         const jsme = await until(() => !!window.JSApplet, 20000);
-        return { status, group: g, solid, import3d: i3, jsme, zip: !!window.JSZip };
+        const builders = [...document.querySelectorAll('.seg.builder button')].map(b => b.textContent).join(' | ');
+        return { status, group: g, solid, import3d: i3, cifBuilder: typeof imp.importFramework === 'function' && /CIF/.test(builders), jsme, zip: !!window.JSZip };
       })()`);
       console.log('SELFTEST', JSON.stringify(r));
     } catch (e) { console.log('SELFTEST failed', e.message); }

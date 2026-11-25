@@ -1,7 +1,7 @@
 {
   "name": "reticublox",
   "productName": "Reticublox",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Design 3D-printable magnetic node and linker blocks for COF/MOF models",
   "main": "main.cjs"
 }
