@@ -2,3 +2,6 @@
 dist/
 desktop/.cache/
 .DS_Store
+
+# your own structures for local testing (never published)
+private/

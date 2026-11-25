@@ -97,10 +97,36 @@ SMILES and drawings are flat, so molecules that are really twisted come out flat
 - **Connection points:** the reactive groups are found as usual. You can still click atoms in the drawing, which shows the molecule projected onto its best-fit plane.
 - **Hydrogens** are left out, as for SMILES.
 - **Metal atoms** are left out; use a Metal cluster card for the SBU. Importing a **MOF CIF** therefore gives you its organic linker.
-  - A CIF of a COF, or any other endless covalent network, can't be split into one molecule. Export a single building block from your program instead.
+  - A CIF of a COF, or any other endless covalent network, can't be split into one molecule here. Use **Start from a CIF** (below) instead.
 - **Several molecules in one file** (for example solvent): the largest is used.
 - **Flat files** (all z = 0) are read as a 2D structure, like a SMILES.
 - Typing a SMILES, picking a preset or drawing replaces the imported structure.
+
+## Starting from a CIF (whole COF or MOF)
+The builder has two modes, switched at the top of the panel:
+
+- **Build from scratch** (the four steps above) makes geometric, generic blocks from a chosen net, or from molecules you pick or draw.
+- **Start from a CIF** takes a COF or MOF crystal structure, for example a geometry-optimised cell from Materials Studio or a MOF-5 CIF from CrystalMaker. It places the magnet connections exactly where the blocks were bonded in the crystal, and works out everything else itself:
+
+1. **It rebuilds the bond network of the cell,** including the bonds that cross the cell edges and the metal–ligand bonds.
+2. **It cuts the linkage bonds.**
+   - **COFs:** imine C=N (also hydrazone and azine) and the C–N bond of β-ketoenamines.
+   - **MOFs:** each carboxylate's C–C bond, so the carboxylate stays with the metal cluster as the point of extension (MOF-5 gives a Zn₄O(CO₂)₆ SBU and a C₆H₄ linker). Also metal–N bonds of pyridyl and azolate linkers, and metal–O bonds to hydroxyl and ether oxygens (CD-MOF-1 gives K⁺ and γ-cyclodextrin blocks). Coordinated solvent (water on the metals) is left out.
+   - Several bonds between the same two pieces (a K⁺ held by two oxygens of one cyclodextrin) make one connection, with a forked fitting.
+3. **Each piece is one copy of a building block.** A piece with three or more linkages is a node (an SBU if it holds metals); one with two is a linker. Copies with the same formula are grouped, and the most typical copy of each is used.
+4. **It finds the net** from how the nodes connect (its dimension and coordination sequences), and picks it from the library, for example hcb. If no library net matches (CD-MOF-1's 4,8-connected net, say), it uses the crystal's own net instead: see below.
+
+It then shows what it found (the net, each node and linker with its formula, SMILES and fit), lets you set the model scale, and builds the parts and the assembled model. The two builders keep their own settings, so switching between them loses nothing.
+
+Every block is a molecular model that **keeps the conformation from the file**: ring twists, side chains (alkyl and alkoxy chains are printed as computed) and any buckling of the layer. The magnet fittings start at the atoms of the cut bonds (for example N on the amine side and C on the aldehyde side of an imine, the carboxylate C and the ring C in a MOF, or Zn and N in ZIF-8) and run exactly along the edges of the ideal net, with equal arms. That is what makes the pieces fit together: a crystal cell's copies of the same block are rarely identical (in an optimised COF they are often near mirror images of each other), so one printed piece can only fill every site if its magnets follow the ideal net rather than one copy's own bond directions. The molecule itself is turned as a whole to fit its site as closely as possible; where an atom sits off its edge, its fitting rod bends to meet the edge (at most 20°, by lengthening the arm if needed).
+
+- **Nets not in the library:** the blocks are placed exactly as they sit in the crystal, and each fitting runs from its atoms to the line joining the two block centres, level with the middle of the cut bond. Block positions and arms are the crystal scaled up by one factor (at least the model scale, more if a fitting needs room to clear its atoms; the panel shows it), so every magnet pair meets face to face. This needs a symmetric crystal structure (an experimental CIF); fittings bend by up to 35°.
+- **Large cells:** CIFs that list the whole cell, or high-symmetry space groups, are fine (CD-MOF-1 has about 2,100 atoms per cell).
+- **Several copies** of the same node or linker in the cell are never exactly alike after optimisation. The note after the import says by how much they differ.
+- **Stacked layers** or interpenetrated nets in one cell are the same framework, so one is modelled.
+- **Scale:** 10 mm per Å to start with. A COF with large pores makes big pieces at that scale; the panel shows the node-to-node distance so you can pick a smaller one.
+- **Not supported yet:** boronate-ester, boroxine and triazine COFs; phosphonate, sulfonate and catecholate MOFs; and nets that aren't in the library.
+- Use the **CIF**, not a MOL2 or PDB export of a supercell. Those files lose the bonds that cross the cell edges, so the framework falls apart.
 
 ## Magnets and polarity
 - Each arm ends in a flared tip with a blind pocket for a disc magnet. The default is 6 × 3 mm with 0.15 mm clearance; you can change this under **Print settings**.
@@ -143,7 +169,7 @@ The Assembly preview closes rings that cross the cell boundary and removes nodes
 - `js/nets.js`: net library, edge detection, coordination checks, patch generation and bipartite colouring
 - `js/geometry.js`: solids using Manifold CSG (block rods, flares and bulges; molecular-model atoms, bonds and fittings; magnet pockets; flat base) and the STL writer
 - `js/chem.js`: RDKit.js parsing, ring and connection-group detection, molecule-to-block and molecule-to-model conversion, presets and SBUs
-- `js/import3d.js`: 3D file import (MOL/SDF, MOL2, XYZ, PDB, CIF with symmetry expansion), bond and bond-order perception
+- `js/import3d.js`: 3D file import (MOL/SDF, MOL2, XYZ, PDB, CIF with symmetry expansion), bond and bond-order perception; whole-framework import (cut the linkages, group the monomers, match the net)
 - `desktop/`: the Mac app (Electron shell, icon, build script)
 - `js/rot.js`: rotation helpers (matching a set of arm directions to a site in the net)
 - `js/viewer.js`: three.js viewer for single blocks and the assembled patch

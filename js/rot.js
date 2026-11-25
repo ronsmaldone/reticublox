@@ -85,3 +85,24 @@ function assign(RA, B) {
   for (const [, i, j] of pairs) if (perm[i] === undefined && !used.has(j)) { perm[i] = j; used.add(j); }
   return perm.length === RA.length && !perm.includes(undefined) ? perm : null;
 }
+
+/**
+ * Least-squares rotation R with R·P[i] ≈ Q[i] for paired vectors (Horn 1987, quaternion method; no
+ * centring, so it suits unit directions). Used to spread a crystal piece's small misfit over all its arms.
+ */
+export function fitRotation(P, Q) {
+  const S = [0, 1, 2].map(i => [0, 1, 2].map(j => P.reduce((s, x, k) => s + x[i] * Q[k][j], 0)));
+  const [[xx, xy, xz], [yx, yy, yz], [zx, zy, zz]] = S;
+  const N = [[xx + yy + zz, yz - zy, zx - xz, xy - yx], [yz - zy, xx - yy - zz, xy + yx, zx + xz],
+    [zx - xz, xy + yx, -xx + yy - zz, yz + zy], [xy - yx, zx + xz, yz + zy, -xx - yy + zz]];
+  const k = S.flat().reduce((s, x) => s + Math.abs(x), 0) + 1; // shift: makes the top eigenvalue dominant
+  let v = [1, 0.1, 0.2, 0.3];
+  for (let it = 0; it < 500; it++) {
+    const w = N.map((row, i) => row.reduce((s, x, j) => s + x * v[j], 0) + k * v[i]);
+    const L = Math.hypot(...w); v = w.map(x => x / L);
+  }
+  const [a, b, c, d] = v;
+  return [[a * a + b * b - c * c - d * d, 2 * (b * c - a * d), 2 * (b * d + a * c)],
+    [2 * (b * c + a * d), a * a - b * b + c * c - d * d, 2 * (c * d - a * b)],
+    [2 * (b * d - a * c), 2 * (c * d + a * b), a * a - b * b - c * c + d * d]];
+}

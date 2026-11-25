@@ -4,7 +4,8 @@
 //   hub at the core centre, one arm per connection point, a bulge for each ring on an arm.
 import { v3, GEOMETRIES } from './nets.js';
 import { spacedBulges, atomRadius } from './geometry.js';
-import { alignDirs, apply, rotBetween, IDENT } from './rot.js';
+import { alignDirs, apply, rotBetween, IDENT, fitRotation } from './rot.js';
+const det3 = R => R[0][0] * (R[1][1] * R[2][2] - R[1][2] * R[2][1]) - R[0][1] * (R[1][0] * R[2][2] - R[1][2] * R[2][0]) + R[0][2] * (R[1][0] * R[2][1] - R[1][1] * R[2][0]);
 
 let RDKit = null;
 export async function initRDKit() {
@@ -175,6 +176,16 @@ export function parseMolecule(smiles, molblock = null) {
   return mm;
 }
 
+/** A molecule straight from a 3D graph ({ atoms [{ el, p }], bonds [{ a, b, order }] }), no RDKit: used for
+ *  pieces of a crystal structure, including metal clusters that RDKit's valence rules would refuse. */
+export function moleculeFromGraph(g) {
+  const atoms = g.atoms.map((a, i) => ({ i, x: a.p[0], y: a.p[1], z: a.p[2], el: a.el }));
+  const bonds = g.bonds.map(b => ({ a: b.a, b: b.b, order: b.order || 1 }));
+  const adj = atoms.map(() => []);
+  for (const b of bonds) { adj[b.a].push(b.b); adj[b.b].push(b.a); }
+  return { smiles: '', atoms, bonds, adj, rings: findRings(atoms, adj), rdmol: null, is3D: true };
+}
+
 function meanBondLength(atoms, bonds) {
   if (!bonds.length) return 1.5;
   return bonds.reduce((s, b) => s + Math.hypot(atoms[b.a].x - atoms[b.b].x, atoms[b.a].y - atoms[b.b].y), 0) / bonds.length;
@@ -214,7 +225,9 @@ export function findConnections(mm, groupKey) {
   if (groupKey === 'dummy') {
     // a dummy atom stands in for the partner; the point of extension is the atom it is bonded to,
     // extended halfway towards the dummy
-    return mm.atoms.filter(a => ['R#', 'R', '*', 'A', 'Q'].includes(a.el)).map(a => ({ atom: mm.adj[a.i][0] ?? a.i, toward: a.i }));
+    // (a * bonded to several atoms — e.g. K⁺ held by two O's of a cyclodextrin — is one forked connection)
+    return mm.atoms.filter(a => ['R#', 'R', '*', 'A', 'Q'].includes(a.el))
+      .map(a => ({ atom: mm.adj[a.i][0] ?? a.i, ...(mm.adj[a.i].length > 1 ? { atoms: [...mm.adj[a.i]] } : {}), toward: a.i }));
   }
   const g = GROUPS[groupKey];
   if (!g || !g.smarts) return [];
@@ -239,6 +252,9 @@ export function autoDetectGroup(mm) {
 }
 
 const P2 = a => [a.x, a.y, a.z];
+/** Atoms a connection starts from: one, or several for a forked connection. */
+const connAtoms = c => c.atoms || [c.atom];
+const centroidOf = P => v3.mul(P.reduce((s, p) => v3.add(s, p), [0, 0, 0]), 1 / P.length);
 
 /**
  * Turn a molecule + chosen connection atoms into a block spec (in Å; scale later).
@@ -247,15 +263,10 @@ const P2 = a => [a.x, a.y, a.z];
 export function moleculeToBlock(mm, conns, opts) {
   const n = conns.length;
   if (n < 2) throw new Error('Need at least two connection points to make a block.');
-  const pts = conns.map(c => {
-    const p = P2(mm.atoms[c.atom]);
-    if (c.toward !== undefined) {
-      // dummy atom: point of extension is half way along the bond to the dummy
-      const d = P2(mm.atoms[c.toward]);
-      return v3.add(p, v3.mul(v3.sub(d, p), 0.5));
-    }
-    return p;
-  });
+  // the point of extension is the connection atom; a dummy (*) partner adds half its bond length to
+  // the arm, so the magnet face sits where the bond's midpoint would be, straight out from the atom
+  const pts = conns.map(c => centroidOf(connAtoms(c).map(i => P2(mm.atoms[i]))));
+  const extra = conns.map((c, i) => (c.toward !== undefined ? 0.5 * v3.len(v3.sub(P2(mm.atoms[c.toward]), pts[i])) : 0));
   const centre = findCentre(mm, conns, pts);
   const ext = opts.ext ?? 0;
   const ringTol = opts.ringTol ?? 1.0;
@@ -280,8 +291,13 @@ export function moleculeToBlock(mm, conns, opts) {
     if (!placed) unused.push(r);
   }
 
-  let dirs = pts.map(p => v3.norm(v3.sub(p, centre)));
-  let lengths = pts.map(p => v3.len(v3.sub(p, centre)) + ext);
+  // a connection atom at the centre itself (a single metal, e.g. Zn in ZIF-8) points along its bond to the partner
+  const raw = pts.map((p, i) => {
+    const v = v3.sub(p, centre);
+    return v3.len(v) > 0.3 || conns[i].toward === undefined ? v3.norm(v) : v3.norm(v3.sub(P2(mm.atoms[conns[i].toward]), p));
+  });
+  let dirs = raw;
+  let lengths = pts.map((p, i) => v3.len(v3.sub(p, centre)) + ext + extra[i]);
   let bulges = armBulges.map(bs => bs.sort((a, b) => a.t - b.t).map(b => b.t));
   dirs = mm.is3D ? orientDirs3D(dirs) : orientDirs(dirs);
 
@@ -299,7 +315,7 @@ export function moleculeToBlock(mm, conns, opts) {
   let autoGeometry = false;
   if (!geometry && sp3 && n === 4 && !mm.is3D) { // a 3D file already has the real tetrahedron
     geometry = 'tetrahedral'; autoGeometry = true;
-    lengths = pts.map(p => v3.len(v3.sub(p, P2(ctrAtom))) + ext);
+    lengths = pts.map((p, i) => v3.len(v3.sub(p, P2(ctrAtom))) + ext + extra[i]);
   }
 
   // geometryOverride may also be an explicit list of unit vectors (e.g. the net vertex's arms)
@@ -317,7 +333,7 @@ export function moleculeToBlock(mm, conns, opts) {
         bulges = bulges.map(() => bulges[0].map((_, k) => bulges.reduce((s, b) => s + b[k], 0) / n));
     }
   }
-  return { n, centre, dirs, lengths, hubRing: !!hubRing, bulges, unusedRings: unused.length, pts, autoGeometry: autoGeometry ? geometry : '', ctrAtom: ctrAtom ? ctrAtom.i : null, imposed: !!ideal };
+  return { n, centre, dirs, raw, lengths, extra, hubRing: !!hubRing, bulges, unusedRings: unused.length, pts, autoGeometry: autoGeometry ? geometry : '', ctrAtom: ctrAtom ? ctrAtom.i : null, imposed: !!ideal };
 }
 
 /** Normal of a set of unit vectors if they are (nearly) coplanar, else null. */
@@ -418,13 +434,15 @@ export function chemBlockToSpec(cb, { name, kind, scale, P, polarity }) {
  * and the bill of materials work unchanged; the atoms are posed so each arm tip lies on its direction.
  * targets: unit vectors the arms must follow (the net's, or an ideal geometry) or null (as drawn).
  */
-export function moleculeModelSpec(mm, conns, cb, { group, ext = 0, scale, P, targets = null, name, kind, polarity }) {
+export function moleculeModelSpec(mm, conns, cb, { group, ext = 0, scale, P, targets = null, name, kind, polarity, maxBend = 0, fixed = null }) {
+  // fixed: { centre (Å), dirs, lengths (mm) } in the molecule's own frame, arms in connection order —
+  // a piece placed exactly as in its crystal (no turning, no reordering)
   const n = conns.length;
-  const c0 = cb.ctrAtom != null ? P2(mm.atoms[cb.ctrAtom]) : cb.centre;
+  const c0 = fixed ? fixed.centre : cb.ctrAtom != null ? P2(mm.atoms[cb.ctrAtom]) : cb.centre;
   let pos = mm.atoms.map(a => v3.sub(P2(a), c0));
   let pts = cb.pts.map(p => v3.sub(p, c0));
-  const u = pts.map(p => v3.norm(p));
-  const tset = targets || cb.dirs;
+  const u = pts.map((p, i) => (v3.len(p) > 0.3 ? v3.norm(p) : cb.raw?.[i] ?? [1, 0, 0]));
+  const tset = fixed ? fixed.dirs : targets || cb.dirs;
   // A conjugated (2D-drawn) molecule stays rigid and flat; only a drawn sp³ centre (e.g. TAM) is
   // opened up into 3D. A flat molecule meeting a non-flat vertex (BTC in tbo) sits in the plane
   // normal to the arms' resultant, and its magnet fittings bend to meet the net instead.
@@ -432,12 +450,19 @@ export function moleculeModelSpec(mm, conns, cb, { group, ext = 0, scale, P, tar
   const rigid = cb.ctrAtom == null || mm.is3D;
   let aim = tset, nt = null;
   const sum = tset.reduce((a, t) => v3.add(a, t), [0, 0, 0]);
-  if (rigid && planeNormal(u) && tset.length >= 3 && v3.len(sum) > 0.05 && tset.some(t => Math.abs(v3.dot(t, v3.norm(sum))) > 0.02)) {
+  if (!fixed && rigid && planeNormal(u) && tset.length >= 3 && v3.len(sum) > 0.05 && tset.some(t => Math.abs(v3.dot(t, v3.norm(sum))) > 0.02)) {
     nt = v3.norm(sum);
     aim = tset.map(t => v3.norm(v3.sub(t, v3.mul(nt, v3.dot(t, nt)))));
   }
-  const al = alignDirs(u, aim, { up: [0, 0, 1] }) || { R: IDENT, perm: u.map((_, i) => i) };
+  const al = (!fixed && alignDirs(u, aim, { up: [0, 0, 1] })) || { R: IDENT, perm: u.map((_, i) => i) };
   const tgt = u.map((_, i) => tset[al.perm[i]]);
+  // a 3D structure fitted to given directions: spread any misfit over all arms (least squares) rather
+  // than matching some exactly and leaving it all on the rest (smaller fitting bends)
+  if (!fixed && mm.is3D && targets && !nt && det3(al.R) > 0) {
+    const Rf = fitRotation(u, tgt);
+    const worst = R => Math.max(...u.map((x, i) => Math.acos(Math.max(-1, Math.min(1, v3.dot(apply(R, x), tgt[i]))))));
+    if (worst(Rf) <= worst(al.R) + 1e-9 || u.reduce((s, x, i) => s + v3.dot(apply(Rf, x), tgt[i]), 0) > u.reduce((s, x, i) => s + v3.dot(apply(al.R, x), tgt[i]), 0)) al.R = Rf;
+  }
   pos = pos.map(p => apply(al.R, p));
   pts = pts.map(p => apply(al.R, p));
   if (nt) {
@@ -505,25 +530,35 @@ export function moleculeModelSpec(mm, conns, cb, { group, ext = 0, scale, P, tar
 
   // arm (fitting) lengths: chemistry, but long enough for the flare to clear the atom
   let lengths = conns.map((c, i) => {
-    const A = atoms[idx.get(c.atom)].p, d = tgt[i];
-    const f = P.flareLength + atomRadius(mm.atoms[c.atom].el, P) * 0.7 + 1;
-    const dA = v3.dot(d, A), disc = f * f - v3.dot(A, A) + dA * dA;
-    const Lmin = dA + (disc > 0 ? Math.sqrt(disc) : f);
-    return Math.max((v3.len(pts[i]) + ext) * scale, Lmin);
+    const d = tgt[i];
+    const Lmin = Math.max(...connAtoms(c).map(k => {
+      const A = atoms[idx.get(k)].p, f = P.flareLength + atomRadius(mm.atoms[k].el, P) * 0.7 + 1;
+      const dA = v3.dot(d, A), disc = f * f - v3.dot(A, A) + dA * dA;
+      return dA + (disc > 0 ? Math.sqrt(disc) : f);
+    }));
+    return Math.max((v3.len(pts[i]) + ext + (cb.extra?.[i] || 0)) * scale, Lmin);
   });
-  if (targets || Math.max(...lengths) - Math.min(...lengths) < 0.1 * Math.max(...lengths)) {
+  // maxBend: lengthen a fitting whose atom sits off its arm line (a crystal piece's buckled or zig-zag
+  // linkage) until its rod bends by at most that many degrees on its way to the edge
+  if (maxBend) lengths = lengths.map((L, i) => Math.max(L, ...connAtoms(conns[i]).map(k => {
+    const A = atoms[idx.get(k)].p, d = tgt[i], dA = v3.dot(d, A), off = v3.len(v3.sub(A, v3.mul(d, dA)));
+    return dA + off / Math.tan(maxBend * Math.PI / 180) + P.flareLength;
+  })));
+  const minLen = lengths;
+  if (fixed) lengths = fixed.lengths.map((L, i) => Math.max(L, 0.1));
+  else if (targets || Math.max(...lengths) - Math.min(...lengths) < 0.1 * Math.max(...lengths)) {
     const L = Math.max(...lengths); lengths = lengths.map(() => L);
   }
   return {
     name, kind, polarity, hubRadius: 0, style: 'model',
     arms: tgt.map((d, i) => ({ dir: d.map(clean), length: lengths[i], bulges: [] })),
     model: {
-      atoms, bonds, fittings: conns.map(c => idx.get(c.atom)),
+      atoms, bonds, fittings: conns.map(c => (c.atoms ? c.atoms.map(k => idx.get(k)) : idx.get(c.atom))), minLen,
       // how far each fitting's rod bends away from its net edge (degrees)
-      bend: Math.round(Math.max(...tgt.map((d, i) => {
-        const A = atoms[idx.get(conns[i].atom)].p, F = v3.sub(v3.mul(d, lengths[i]), v3.mul(d, P.flareLength));
+      bend: Math.round(Math.max(...tgt.flatMap((d, i) => connAtoms(conns[i]).map(k => {
+        const A = atoms[idx.get(k)].p, F = v3.sub(v3.mul(d, lengths[i]), v3.mul(d, P.flareLength));
         return Math.acos(Math.max(-1, Math.min(1, v3.dot(v3.norm(v3.sub(F, A)), d)))) * 180 / Math.PI;
-      }))),
+      })))),
     },
   };
 }

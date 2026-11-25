@@ -55,7 +55,7 @@ export function checkSpec(spec, P) {
   if (spec.model) {
     spec.arms.forEach((a, i) => {
       for (const A of fitAtoms(spec.model, i)) {
-        const f = v3.len(v3.sub(v3.mul(a.dir, a.length - P.flareLength), A.p));
+        const f = v3.len(v3.sub(armTip(a, a.length - P.flareLength), A.p));
         if (f < atomRadius(A.el, P) * 0.5) { w.push(`Magnet fitting ${i + 1} runs into its atom — press “Rebuild model & parts” after changing print settings.`); break; }
       }
     });
@@ -83,7 +83,10 @@ export function effectiveFlareRadius(P) {
   return Math.max(P.flareRadius, P.magnetDiameter / 2 + P.clearance + 1.0, P.rodRadius);
 }
 
-export const isPlanar = spec => spec.arms.every(a => Math.abs(a.dir[2]) < 1e-3) &&
+/** Point at distance t along an arm. Arms start at the centre, or (crystal pieces) at their atom `at`. */
+export const armTip = (a, t = a.length) => v3.add(a.at || [0, 0, 0], v3.mul(a.dir, t));
+
+export const isPlanar = spec => spec.arms.every(a => Math.abs(a.dir[2]) < 1e-3 && Math.abs(armTip(a)[2]) < 1e-3) &&
   (!spec.model || spec.model.atoms.every(a => Math.abs(a.p[2]) < 1e-3));
 
 /**
@@ -101,14 +104,14 @@ export function flatPrint(spec, P) {
   if (!spec.model) return isPlanar(spec) ? { cut: -(P.rodRadius - P.flatBase), flip: false } : null;
   const zs0 = spec.model.atoms.map(a => a.p[2]);
   if (Math.max(...zs0) - Math.min(...zs0) > 1e-3) return null;
-  const flip = spec.arms.reduce((t, a) => t + a.dir[2] * a.length, 0) < zs0[0] * spec.arms.length - 1e-6;
+  const flip = spec.arms.reduce((t, a) => t + armTip(a)[2], 0) < zs0[0] * spec.arms.length - 1e-6;
   const sg = flip ? -1 : 1;
   const z0 = sg * zs0[0];
   const cut = z0 - (P.rodRadius - P.flatBase);
   const pocketR = P.magnetDiameter / 2 + P.clearance, pocketH = P.magnetThickness + P.clearance;
   for (const a of spec.arms) {
     const rad = pocketR * Math.sqrt(Math.max(0, 1 - a.dir[2] ** 2));
-    if (Math.min(sg * a.dir[2] * a.length, sg * a.dir[2] * (a.length - pocketH)) - rad < cut + 0.6) return null;
+    if (Math.min(sg * armTip(a)[2], sg * armTip(a, a.length - pocketH)[2]) - rad < cut + 0.6) return null;
   }
   return { cut, flip };
 }
@@ -154,7 +157,7 @@ function buildModelParts(spec, P, parts, seg, flareR) {
   // fitting: rod from the atom to the flare start, then a flare along the net edge (so magnet faces
   // meet squarely); a sphere rounds the elbow when the rod has to bend to reach the edge
   spec.arms.forEach((arm, k) => {
-    const F = v3.mul(arm.dir, arm.length - P.flareLength);
+    const F = armTip(arm, arm.length - P.flareLength);
     for (const { p: A } of fitAtoms(spec.model, k)) {
       const r = v3.sub(F, A);
       parts.push(Manifold.cylinder(v3.len(r) + 0.5, P.rodRadius, P.rodRadius, seg).transform(alignZ(r, A)));
@@ -173,7 +176,7 @@ function finish(parts, spec, P, pocketR, pocketH, seg) {
 
   // magnet pockets, along each arm (net edge) direction
   const pockets = spec.arms.map(arm =>
-    Manifold.cylinder(pocketH + 1, pocketR, pocketR, seg).transform(alignZ(arm.dir, v3.mul(arm.dir, arm.length - pocketH))));
+    Manifold.cylinder(pocketH + 1, pocketR, pocketR, seg).transform(alignZ(arm.dir, armTip(arm, arm.length - pocketH))));
   const pocketU = Manifold.union(pockets);
   pockets.forEach(p => p.delete());
   let s2 = solid.subtract(pocketU);

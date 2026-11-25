@@ -4,14 +4,14 @@
 // topology), Molecule (preset / SMILES / drawn) or SBU (metal cluster, MOFs only).
 import { NETS, analyseNet, buildPatch, describeGeometry, GEOMETRIES, v3 } from './nets.js';
 import {
-  initManifold, DEFAULT_PRINT, buildSolid, solidToMesh, meshToSTL, checkSpec,
+  initManifold, DEFAULT_PRINT, buildSolid, solidToMesh, meshToSTL, checkSpec, armTip,
   makeNodeSpec, makeLinkerSpec, effectiveFlareRadius, atomRadius,
 } from './geometry.js';
 import {
   initRDKit, GROUPS, PRESET_LIST, SBUS, sbuCN, parseMolecule, findConnections, autoDetectGroup,
-  moleculeToBlock, chemBlockToSpec, sbuToSpec, sbuModelSpec, moleculeModelSpec, prepare3D,
+  moleculeToBlock, chemBlockToSpec, sbuToSpec, sbuModelSpec, moleculeModelSpec, prepare3D, moleculeFromGraph,
 } from './chem.js';
-import { importStructure, IMPORT_ACCEPT } from './import3d.js';
+import { importStructure, importFramework, IMPORT_ACCEPT } from './import3d.js';
 import { Viewer } from './viewer.js';
 
 const $ = s => document.querySelector(s);
@@ -40,6 +40,9 @@ const state = {
   asm: store.get('asm', null),
   wiz: { ...freshWiz(), ...store.get('wiz', {}) },
   built: false,
+  builder: store.get('builder', 'scratch'), // 'scratch' (steps 1–4) | 'cif' (from a crystal structure)
+  cif: store.get('cif', null),               // { name, fw, scale, sel }
+  cifError: '',
 };
 const W = state.wiz;
 let nextId = Math.max(0, ...state.parts.map(p => p.id)) + 1;
@@ -48,7 +51,7 @@ const netCache = new Map();
 const molCache = new Map();
 let viewer, rdkitReady = false;
 
-const save = () => { store.set('parts', state.parts); store.set('print', state.P); store.set('asm', state.asm); store.set('wiz', W); };
+const save = () => { store.set('parts', state.parts); store.set('print', state.P); store.set('asm', state.asm); store.set('wiz', W); store.set('builder', state.builder); store.set('cif', state.cif); };
 const status = t => ($('#status').textContent = t);
 const fmt = (x, d = 1) => Number(x).toFixed(d);
 const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -158,26 +161,35 @@ function slotSpec(key) {
   } catch (e) { return { error: e.message }; }
   spec.kind = t.kind;
   ensurePrintable(spec);
-  // fit check
-  let fit = { ok: true, msg: 'fits the net' };
-  if (spec.arms.length !== t.cn) fit = { ok: false, msg: `has ${spec.arms.length} connections, needs ${t.cn}` };
-  else {
-    const A = allAngles(spec.arms.map(a => a.dir)), B = allAngles(t.dirs);
-    // pairwise angles miss "flat vs pyramidal", so also compare how far arms tilt out of plane
-    const dev = Math.max(...A.map((x, i) => Math.abs(x - B[i])), Math.round(Math.abs(tilt(spec.arms.map(a => a.dir)) - tilt(t.dirs))));
-    if (spec.model?.bend > 20) fit = { ok: false, msg: `molecule shape is far from the net — magnet fittings bend by ${spec.model.bend}°` };
-    else if (dev > 8) fit = { ok: false, msg: key === 'edge' ? 'bent — the net needs a straight linker' : `angles off by up to ${dev}° — use “Match the net”` };
-    else if (dev > 2) fit = { ok: true, msg: `fits (angles within ${dev}°)` };
-    else if (spec.model?.bend > 3) fit = { ok: true, msg: `fits — molecule kept flat, fittings bend ${spec.model.bend}° to meet the net` };
-  }
-  return { spec, fit, cb };
+  return { spec, fit: judgeFit(spec, t, key === 'edge'), cb };
+}
+/** How well a block's arms match a net site (t: { cn, dirs }). */
+function judgeFit(spec, t, isEdge, hint = ' — use “Match the net”') {
+  if (spec.arms.length !== t.cn) return { ok: false, msg: `has ${spec.arms.length} connections, needs ${t.cn}` };
+  const radial = spec.arms.map(a => v3.norm(armTip(a)));
+  const A = allAngles(radial), B = allAngles(t.dirs);
+  // pairwise angles miss "flat vs pyramidal", so also compare how far arms tilt out of plane
+  const dev = Math.max(...A.map((x, i) => Math.abs(x - B[i])), Math.round(Math.abs(tilt(radial) - tilt(t.dirs))));
+  if (spec.model?.bend > 20) return { ok: false, msg: `molecule shape is far from the net — magnet fittings bend by ${spec.model.bend}°` };
+  if (dev > 8) return { ok: false, msg: isEdge ? 'bent — the net needs a straight linker' : `angles off by up to ${dev}°${hint}` };
+  if (dev > 2) return { ok: true, msg: `fits (angles within ${dev}°)` };
+  if (spec.model?.bend > 3) return { ok: true, msg: `fits — molecule kept flat, fittings bend ${spec.model.bend}° to meet the net` };
+  return { ok: true, msg: 'fits the net' };
 }
 /** Mean out-of-plane tilt (degrees) of arms relative to the plane normal to their resultant. */
 function tilt(dirs) {
   const sum = dirs.reduce((s, d) => v3.add(s, d), [0, 0, 0]);
-  if (v3.len(sum) < 0.05) return 0;
-  const n = v3.norm(sum);
-  return dirs.reduce((s, d) => s + Math.asin(Math.min(1, Math.abs(v3.dot(d, n)))), 0) / dirs.length * 180 / Math.PI;
+  const meanTilt = n => dirs.reduce((s, d) => s + Math.asin(Math.min(1, Math.abs(v3.dot(d, n)))), 0) / dirs.length * 180 / Math.PI;
+  if (v3.len(sum) >= 0.3) return meanTilt(v3.norm(sum)); // clearly pyramidal / 3D
+  // (nearly) flat: tilt out of the best plane through the arms (a slightly buckled node from a crystal)
+  let best = 0;
+  for (let i = 0; i < dirs.length; i++) for (let j = i + 1; j < dirs.length; j++) {
+    const c = v3.cross(dirs[i], dirs[j]);
+    if (v3.len(c) < 0.2) continue;
+    const t = meanTilt(v3.norm(c));
+    if (best === 0 || t < best) best = t;
+  }
+  return best;
 }
 const shortName = s => { const m = String(s).match(/\(([^)]+)\)\s*$/); return (m ? m[1] : String(s)).slice(0, 40); };
 
@@ -355,7 +367,8 @@ function editor(key, r) {
 
 function renderWizard() {
   if (W.step > 1 && !reachable(W.step)) W.step = [4, 3, 2, 1].find(reachable);
-  $('#wizard').innerHTML = `<div class="wtitle">Build a framework model</div>` + step1() + step2() + step3() + step4();
+  if (state.builder === 'cif') { $('#wizard').innerHTML = builderSwitch() + renderCif(); return; }
+  $('#wizard').innerHTML = builderSwitch() + `<div class="wtitle">Build a framework model</div>` + step1() + step2() + step3() + step4();
   if (W.open && slot(W.open).source === 'molecule') drawMolecule(W.open);
 }
 
@@ -396,6 +409,10 @@ $('#wizard').addEventListener('click', e => {
     case 'rmconn': toggleConn(key, +v); return;
     case 'clearconns': { const s = slot(key); if (s.mol) { s.mol.conns = []; s.mol.group = 'manual'; } previewSlot(key); break; }
     case 'import': importFor = key; fileIn.value = ''; fileIn.click(); return;
+    case 'builder': state.builder = v; state.preview = null; if (v === 'cif' && state.cif?.sel != null) previewCif(state.cif.sel); else refreshView(); break;
+    case 'cifopen': fwIn.value = ''; fwIn.click(); return;
+    case 'cifblock': state.cif.sel = +v; previewCif(+v); break;
+    case 'cifbuild': buildCif(); break;
     case 'style': {
       const s = slot(key);
       if (s.source === 'sbu') s.sbuStyle = v;
@@ -414,7 +431,8 @@ $('#wizard').addEventListener('click', e => {
 $('#wizard').addEventListener('change', e => {
   const el = e.target;
   const key = el.closest('[data-slot]')?.dataset.slot;
-  if (el.dataset.act === 'scale') { W.scale = +el.value || 6; }
+  if (el.dataset.act === 'cifscale') { state.cif.scale = +el.value || 10; if (state.cif.sel != null) previewCif(state.cif.sel); }
+  else if (el.dataset.act === 'scale') { W.scale = +el.value || 6; }
   else if (el.dataset.act === 'preset') { if (el.value) loadSlotMolecule(key, el.value, el.selectedOptions[0].textContent); }
   else if (el.dataset.act === 'smiles') { loadSlotMolecule(key, el.value, 'Custom molecule'); }
   else if (el.dataset.field && key) {
@@ -586,6 +604,149 @@ fileIn.addEventListener('change', async () => {
   } catch (e) { setWarnings([`Could not import ${f.name}: ${e.message}`]); }
 });
 
+// ---------------- whole-framework import (COF CIF → net + node and linker blocks) ----------------
+const fwIn = Object.assign(document.createElement('input'), { type: 'file', accept: '.cif', hidden: true });
+document.body.append(fwIn);
+fwIn.addEventListener('change', async () => {
+  const f = fwIn.files[0];
+  if (!f) return;
+  status(`Reading ${f.name}…`);
+  try {
+    const fw = importFramework(await f.text(), f.name);
+    state.cif = { name: fw.name, fw, scale: state.cif?.scale ?? 10, sel: 0 };
+    state.cifError = '';
+    cifCache.clear(); cifK = { key: '', k: 0 };
+    registerCifNet();
+    previewCif(0);
+  } catch (e) { state.cifError = `Could not read ${f.name}: ${e.message}`; }
+  status(rdkitReady ? 'Ready' : 'Loading chemistry toolkit…');
+  setWarnings([]);
+  save(); renderWizard();
+});
+
+function builderSwitch() {
+  const b = (v, l) => `<button data-act="builder" data-v="${v}" class="${state.builder === v ? 'on' : ''}">${l}</button>`;
+  return `<div class="seg builder">${b('scratch', 'Build from scratch')}${b('cif', 'Start from a CIF')}</div>`;
+}
+
+// Each block of an imported framework: its molecule exactly as computed, connection points at the
+// cut linkage bonds (the * atoms), fittings along the crystal's own bond directions.
+const cifCache = new Map();
+function cifBlock(i, k = null) {
+  const C = state.cif, t = C.fw.types[i];
+  if (!t.graph) return { error: 'Saved from an older version: choose the CIF again.' };
+  try {
+    let m = cifCache.get(i);
+    if (!m) {
+      const mm = moleculeFromGraph(t.graph);
+      m = { mm, conns: findConnections(mm, 'dummy') };
+      cifCache.set(i, m);
+    }
+    // SMILES for organic pieces (RDKit); metal clusters are shown by formula
+    if (m.smiles === undefined && rdkitReady) { try { m.smiles = t.molblock ? prepare3D(t.molblock).smiles : ''; } catch { m.smiles = ''; } }
+    const kind = t.role === 'linker' ? 'linker' : 'node';
+    const multi = C.fw.types.filter(x => x.role === 'node').length > 1;
+    const name = `${C.name} ${t.metal ? 'SBU' : kind}${multi && kind === 'node' ? ' ' + t.label : ''}`;
+    if (t.fixed) {
+      // a net not in the library: the block sits exactly as in the crystal, its arms reaching the magnet
+      // faces on the lines to its neighbours, all scaled by one factor (k mm per Å) so the model closes
+      const kk = k ?? cifArmScale();
+      const cb = moleculeToBlock(m.mm, m.conns, { ext: 0, geometryOverride: '' });
+      const spec = moleculeModelSpec(m.mm, m.conns, cb, { group: 'dummy', ext: 0, scale: C.scale, P: state.P, kind, maxBend: 35, name,
+        fixed: { centre: t.fixed.centre, dirs: t.fixed.dirs, lengths: t.fixed.t.map(x => x * kk) } });
+      spec.kind = kind;
+      const b = spec.model.bend;
+      return { spec, smiles: m.smiles, fit: { ok: true, msg: `placed as in the crystal${b > 3 ? `; fittings bend up to ${b}°` : ''}` } };
+    }
+    // the molecule stays exactly as in the crystal (rigid); its magnet fittings point along the edges of
+    // the ideal net with equal arms, so every copy fits every site and the model closes
+    const site = kind === 'linker' ? { cn: 2, dirs: [[1, 0, 0], [-1, 0, 0]] } : net(C.fw.net).types[t.label];
+    const cb = moleculeToBlock(m.mm, m.conns, { ext: 0, geometryOverride: site.dirs });
+    const spec = moleculeModelSpec(m.mm, m.conns, cb, { group: 'dummy', ext: 0, scale: C.scale, P: state.P, targets: cb.dirs, kind, maxBend: 20, name });
+    spec.kind = kind;
+    const b = spec.model.bend;
+    return { spec, smiles: m.smiles, fit: { ok: true, msg: b > 3 ? `molecule as in the crystal; fittings bend up to ${b}° to meet the net` : 'molecule as in the crystal; fittings straight' } };
+  } catch (e) { return { error: e.message }; }
+}
+/**
+ * Crystal nets: the one scale (mm per Å) for every arm, at least the model scale and large enough that
+ * every magnet fitting clears its atoms (a short metal–O link may need it raised).
+ */
+let cifK = { key: '', k: 0 };
+function cifArmScale() {
+  const C = state.cif, key = JSON.stringify([C.name, C.scale, state.P]);
+  if (cifK.key === key) return cifK.k;
+  let k = C.scale;
+  C.fw.types.forEach((t, i) => {
+    if (!t.fixed) return;
+    const r = cifBlock(i, C.scale);
+    if (r.spec) t.fixed.t.forEach((x, a) => { k = Math.max(k, r.spec.model.minLen[a] / x); });
+  });
+  cifK = { key, k: Math.ceil(k * 10) / 10 };
+  return cifK.k;
+}
+/** Make the crystal's own net (when the library has none that fits) available to the assembly. */
+function registerCifNet() {
+  if (state.cif?.fw?.crystalNet) netCache.set('cif', state.cif.fw.crystalNet);
+}
+const netTitle = k => (k === 'cif' ? 'net taken from the crystal' : `${k.replace('_t', '')} · ${NETS[k].title}`);
+function previewCif(i) {
+  const r = cifBlock(i);
+  state.preview = r.spec || null;
+  state.view = 'block';
+  refreshView();
+}
+const cifKey = t => (t.role === 'linker' ? 'edge' : 'v:' + t.label);
+
+function renderCif() {
+  const C = state.cif;
+  const section = (n, title, body) => `<section class="step open"><header><span class="num">${n}</span><span class="stitle">${title}</span></header><div class="sbody">${body}</div></section>`;
+  const pick = `<div class="row"><button class="${C ? 'ghost' : 'primary'}" data-act="cifopen">⤓ ${C ? 'Choose another CIF…' : 'Choose a CIF…'}</button>${C ? `<span class="cifname">${esc(C.name)}.cif</span>` : ''}</div>`;
+  let html = `<div class="wtitle">Model a framework from its crystal structure</div>` + section(1, 'Crystal structure', `
+    <p class="hint">A COF or MOF unit cell (.cif) from Materials Studio, Mercury, VESTA, CrystalMaker or similar. The framework is cut into its building blocks at the bonds that link them, and the magnet connections go exactly where those bonds were:</p>
+    <ul class="hint"><li><b>COFs:</b> imine, hydrazone, azine and β-ketoenamine bonds.</li><li><b>MOFs:</b> each carboxylate's C–C bond (the carboxylate stays with the metal cluster, the SBU) and metal–N bonds of pyridyl and azolate linkers.</li></ul>
+    <p class="hint">The net is worked out from how the blocks connect. Every block prints as a molecular model in the exact conformation from the file.</p>
+    ${pick}${state.cifError ? `<p class="fit bad">${esc(state.cifError)}</p>` : ''}`);
+  if (!C) return html;
+  const fw = C.fw;
+  const blocks = fw.types.map((t, i) => [t, cifBlock(i), i]);
+  const card = ([t, r, i]) => {
+    const L = r.spec?.arms.map(reach) || [];
+    const size = !r.spec ? '' : t.role === 'linker' ? `${fmt(L[0] + L[1], 0)} mm magnet to magnet` : `arms ${fmt(Math.min(...L), 0)}${Math.max(...L) - Math.min(...L) > 0.5 ? '–' + fmt(Math.max(...L), 0) : ''} mm`;
+    return `<div class="slot cifblock ${C.sel === i ? 'open' : ''}" data-act="cifblock" data-v="${i}">
+      <div class="slot-head"><div><b>${t.role === 'linker' ? 'Linker' : (t.metal ? 'Metal cluster (SBU)' : 'Node') + (fw.types.filter(x => x.role === 'node').length > 1 ? ` ${t.label}` : '')}</b><small>${t.formula} · ${t.cn}-c · ${t.perCell} per cell</small></div></div>
+      <div class="slot-sum">${r.spec ? `${r.spec.model.atoms.length} atoms printed · ${size}` : ''}</div>
+      ${r.error ? `<span class="fit bad">${esc(r.error)}</span>` : `<span class="fit ${r.fit.ok ? 'ok' : 'bad'}">${r.fit.ok ? '✓' : '⚠'} ${esc(r.fit.msg)}</span>`}
+      ${r.smiles ? `<div class="smiles" title="SMILES (* = the partner across each cut linkage)">${esc(r.smiles)}</div>` : ''}
+      ${t.spread > 0.05 ? `<p class="hint">The ${t.perCell} copies in the cell differ by up to ${fmt(t.spread, 2)} Å; the most typical one is used.</p>` : ''}
+    </div>`;
+  };
+  html += section(2, 'What was found', `
+    <div class="info"><table>
+      <tr><th>Net</th><td>${esc(netTitle(fw.net))} (${fw.dim}D)</td></tr>
+      <tr><th>Type</th><td>${fw.cls === 'mof' ? 'MOF' : 'COF'} · ${fw.mode === 'linker' ? 'node ⟷ linker ⟷ node' : 'node ⟷ node, directly'}</td></tr></table></div>
+    ${blocks.map(card).join('')}
+    ${fw.notes.length ? `<div class="hint">${fw.notes.map(esc).join('<br>')}</div>` : ''}
+    <p class="hint">Click a block to see it. Magnet fittings start at the atoms of the cut bonds (forking when one link has several) and run to ${fw.crystalNet ? 'the line between neighbouring blocks, as they sit in the crystal' : 'the edges of the ideal net'}.</p>`);
+  // size: node centre → node centre at this scale
+  const node = blocks.find(([t]) => t.role === 'node')?.[1].spec, link = blocks.find(([t]) => t.role === 'linker')?.[1].spec;
+  const E = node ? 2 * meanArm(node) + (link ? reach(link.arms[0]) + reach(link.arms[1]) : 0) : 0;
+  html += section(3, 'Size and build', `
+    <div class="scale-row">Model scale <input type="number" data-act="cifscale" value="${C.scale}" min="1" step="0.5"> mm per Å</div>
+    ${fw.crystalNet ? `<p class="hint">Molecules at ${C.scale} mm per Å; the framework itself (block positions and arms) is the crystal scaled by ${fmt(cifArmScale(), 1)} mm per Å${cifArmScale() > C.scale ? ', a little more so every magnet fitting clears its atoms' : ''}.</p>`
+      : E ? `<p class="hint">Node centre to node centre: ${fmt(E, 0)} mm. Molecular models print best at 9–12 mm per Å; lower it for smaller pieces.</p>` : ''}
+    <button class="primary" data-act="cifbuild">Build model & parts</button>`);
+  return html;
+}
+function buildCif() {
+  const C = state.cif;
+  if (!C) return;
+  const results = C.fw.types.map((t, i) => [cifKey(t), cifBlock(i)]);
+  const errors = results.filter(([, r]) => r.error).map(([k, r]) => `${k === 'edge' ? 'Linker' : 'Node'}: ${r.error}`);
+  if (errors.length) { setWarnings(errors); return; }
+  assemble(C.fw.net, C.fw.mode, results.map(([k, r]) => [k, r.spec]), C.fw.crystalNet ? cifArmScale() : null);
+}
+
 async function openDraw(key) {
   drawFor = key;
   $('#drawDlg').showModal();
@@ -610,25 +771,30 @@ function buildModel() {
   const results = keys.map(k => [k, slotSpec(k)]);
   const errors = results.filter(([, r]) => r.error).map(([k, r]) => `${slotTitle(k)}: ${r.error}`);
   if (errors.length) { setWarnings(errors); return; }
+  assemble(W.net, W.mode, results.map(([k, r]) => [k, r.spec]));
+  state.built = true;
+  save(); renderWizard();
+}
+/** Turn block specs (keyed 'v:<label>' / 'edge') into parts and set up the assembled model. */
+function assemble(netKey, mode, specs, crystalScale = null) {
   state.parts = state.parts.filter(p => p.source !== 'wizard');
-  const an = net(W.net);
+  const an = net(netKey);
   const patch = buildPatch(an, 2);
   const nodes = {};
   let linker = null;
-  for (const [k, r] of results) {
-    const spec = structuredClone(r.spec);
+  for (const [k, s] of specs) {
+    const spec = structuredClone(s);
     if (k === 'edge') { spec.polarity = 'S'; linker = addPart(spec).id; continue; }
     const label = k.slice(2);
-    if (W.mode === 'linker') spec.polarity = 'N';
+    if (mode === 'linker') spec.polarity = 'N';
     else {
       const cols = new Set(patch.verts.filter(v => v.type === label).map(v => v.colour));
       spec.polarity = cols.size > 1 ? 'N+S' : cols.has(0) ? 'N' : 'S';
     }
     nodes[label] = addPart(spec).id;
   }
-  state.asm = { net: W.net, nodes, linker, reps: an.dim === 2 ? 3 : (an.vertsPerCell > 20 ? 1 : 2) };
+  state.asm = { net: netKey, nodes, linker, reps: an.dim === 2 ? 3 : (an.vertsPerCell > 20 ? 1 : 2), ...(crystalScale ? { k: crystalScale } : {}) };
   $('#asmReps').value = state.asm.reps;
-  state.built = true;
   state.preview = null;
   state.view = 'assembly';
   save(); renderParts(); refreshView();
@@ -665,7 +831,7 @@ function refreshView() {
 }
 
 function describeArms(spec) {
-  const L = spec.arms.map(a => a.length);
+  const L = spec.arms.map(reach);
   if (spec.kind === 'linker') return `${fmt(L[0] + L[1])} mm long`;
   return Math.max(...L) - Math.min(...L) < 0.5 ? `arms ${fmt(L[0])} mm` : `arms ${fmt(Math.min(...L))}–${fmt(Math.max(...L))} mm`;
 }
@@ -726,9 +892,11 @@ $('#clearParts').addEventListener('click', () => {
 const modelLook = spec => spec.model ? {
   atoms: spec.model.atoms.map(a => ({ p: a.p, r: atomRadius(a.el, state.P) })),
   bonds: spec.model.bonds,
-  arms: spec.arms.map((a, k) => ({ dir: a.dir, from: [].concat(spec.model.fittings[k]).map(i => spec.model.atoms[i].p), tip: v3.mul(a.dir, a.length) })),
+  arms: spec.arms.map((a, k) => ({ dir: a.dir, from: [].concat(spec.model.fittings[k]).map(i => spec.model.atoms[i].p), tip: armTip(a) })),
 } : null;
-const meanArm = spec => spec.arms.reduce((s, a) => s + a.length, 0) / spec.arms.length;
+/** Centre → magnet face distance of an arm (arms of crystal pieces start at their atom, not the centre). */
+const reach = a => v3.len(armTip(a));
+const meanArm = spec => spec.arms.reduce((s, a) => s + reach(a), 0) / spec.arms.length;
 function showAssembly() {
   const a = state.asm;
   if (!a) { viewer.clear(); setWarnings(['Finish step 4 and press “Build model & parts” to see the assembled framework.']); $('#viewInfo').textContent = ''; return; }
@@ -746,8 +914,9 @@ function showAssembly() {
   const patch = buildPatch(an, a.reps || 2);
   if (!Object.keys(nodeLook).length || !patch.edges.length) { viewer.clear(); setWarnings(['Nothing to show — rebuild the model.']); return; }
   const [, , ia, ib] = patch.edges[0];
-  const linkLen = lp ? lp.spec.arms[0].length + lp.spec.arms[1].length : 0;
-  const E = (nodeLook[patch.verts[ia].type]?.arm ?? 0) + (nodeLook[patch.verts[ib].type]?.arm ?? 0) + linkLen;
+  const linkLen = lp ? reach(lp.spec.arms[0]) + reach(lp.spec.arms[1]) : 0;
+  // a crystal net is in Å, scaled as a whole; a library net has unit edges, scaled by the arm lengths
+  const E = an.crystal ? (a.k || 10) : (nodeLook[patch.verts[ia].type]?.arm ?? 0) + (nodeLook[patch.verts[ib].type]?.arm ?? 0) + linkLen;
   viewer.showAssembly(patch, {
     edge: E, nodeLook, dim: an.dim, direct: !lp,
     P: { ...state.P, flareR: effectiveFlareRadius(state.P) },
@@ -769,8 +938,8 @@ function showAssembly() {
     <table>${Object.entries(counts).map(([k, n]) => { const [nm, pol] = k.split('|'); return `<tr><td>${esc(nm)}</td><td>${polTag(pol)}</td><td>× ${n}</td></tr>`; }).join('')}
     ${lp ? `<tr><td>${esc(lp.spec.name)}</td><td>${polTag('S')}</td><td>× ${patch.edges.length}</td></tr>` : ''}
     <tr><td>Magnets</td><td></td><td>× ${magnets}</td></tr></table>
-    <div class="hint">Edge (centre–centre) ${fmt(E, 0)} mm. ${lp ? 'Node magnets N-out, linker magnets S-out: nodes only stick to linkers.' : 'Alternate N-out / S-out nodes (dark / light in the preview).'}</div>`;
-  $('#viewInfo').textContent = `${a.net.replace('_t', '')} — ${patch.verts.length} nodes, ${patch.edges.length} ${lp ? 'linkers' : 'direct bonds'}`;
+    <div class="hint">${an.crystal ? `Placed as in the crystal, scaled ${fmt(E, 1)} mm per Å.` : `Edge (centre–centre) ${fmt(E, 0)} mm.`} ${lp ? 'Node magnets N-out, linker magnets S-out: nodes only stick to linkers.' : 'Alternate N-out / S-out nodes (dark / light in the preview).'}</div>`;
+  $('#viewInfo').textContent = `${a.net === 'cif' ? 'crystal net' : a.net.replace('_t', '')} — ${patch.verts.length} nodes, ${patch.edges.length} ${lp ? 'linkers' : 'direct bonds'}`;
 }
 $('#asmReps').addEventListener('change', e => { if (state.asm) { state.asm.reps = +e.target.value; save(); refreshView(); } });
 
@@ -778,7 +947,7 @@ function assemblyGuide() {
   const P = state.P;
   return [
     'RETICUBLOX — assembly guide', '',
-    W.net ? `Framework: ${CLS[W.cls] || ''} ${W.dim}D, net ${W.net.replace('_t', '')} (${NETS[W.net].title}, ${NETS[W.net].sg})` : '',
+    state.asm ? `Framework: ${state.builder === 'cif' && state.cif ? `from ${state.cif.name}.cif, ` : CLS[W.cls] ? CLS[W.cls] + ' ' : ''}${net(state.asm.net).dim}D, ${state.asm.net === 'cif' ? `net taken from the crystal, scaled ${state.asm.k} mm per Å` : `net ${state.asm.net.replace('_t', '')} (${NETS[state.asm.net].title}, ${NETS[state.asm.net].sg})`}` : '',
     `Magnets: ${P.magnetDiameter} x ${P.magnetThickness} mm discs (pocket ${(P.magnetDiameter + 2 * P.clearance).toFixed(2)} x ${(P.magnetThickness + P.clearance).toFixed(2)} mm).`, '',
     'POLARITY (important):',
     '  "N out": insert every magnet with its NORTH pole facing outwards. "S out": SOUTH pole outwards.',
@@ -818,6 +987,7 @@ $('#viewMode').addEventListener('click', e => {
 // ---------------- boot ----------------
 (async function boot() {
   viewer = new Viewer($('#viewer'));
+  registerCifNet();
   if (W.net && !NETS[W.net]) Object.assign(W, freshWiz());
   renderWizard();
   renderParts();

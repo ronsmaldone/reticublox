@@ -222,6 +222,15 @@ export const NETS = {
     onlyBetweenSites: true, // bonds only between the two layers (prisms), not within a layer
     cn: { A: 6 },
   },
+  sod: {
+    name: 'sod — sodalite', dim: 3,
+    examples: 'ZIF-8, ZIF-90 (Zn + imidazolate); truncated-octahedron cages',
+    cell: [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+    // Im-3m, vertex at (¼, 0, ½): the 6 positions of one orbit + body centring = 12 per cubic cell
+    verts: [[0.25, 0, 0.5], [0.75, 0, 0.5], [0.5, 0.25, 0], [0.5, 0.75, 0], [0, 0.5, 0.25], [0, 0.5, 0.75]]
+      .flatMap(f => [f, f.map(x => (x + 0.5) % 1)]).map(f => ({ t: 'A', f })),
+    cn: { A: 4 },
+  },
 };
 
 // Per-net metadata for the builder: space group (plane group for 2D layers), a short plain
@@ -245,6 +254,7 @@ const META = {
   stp:   { sg: 'P6/mmm',   title: 'trigonal prism + square (4,6-c)', mof: 'PCN-600 (Fe₃O trimer + TCPP)', cof: '' },
   srs:   { sg: 'I4₁32',    title: 'SrSi₂ (3-c, chiral)',     mof: 'Chiral 3-c MOFs', cof: 'srs COFs (rare)' },
   acs:   { sg: 'P6₃/mmc',  title: 'trigonal prism 6-c',      mof: 'MIL-88, MOF-235', cof: '' },
+  sod:   { sg: 'Im-3m',    title: 'sodalite',                mof: 'ZIF-8, ZIF-90 (Zn imidazolates)', cof: '' },
 };
 for (const [k, m] of Object.entries(META)) Object.assign(NETS[k], m, { note: NETS[k].examples });
 
@@ -398,7 +408,8 @@ export function describeGeometry(dirs) {
   const uniq = [...new Set(angles)].sort((a, b) => a - b);
   const names = {
     2: planar && uniq.includes(180) ? 'linear' : 'bent',
-    3: planar ? 'trigonal planar' : 'trigonal pyramidal',
+    // angle sum ≥ 354°: a slightly buckled node from a crystal structure is still trigonal planar
+    3: planar || angles.reduce((x, y) => x + y, 0) >= 354 ? 'trigonal planar' : 'trigonal pyramidal',
     4: planar ? (uniq[0] === 90 ? 'square planar' : 'planar 4-c (rectangle/kagome)') : (uniq[0] === 109 ? 'tetrahedral' : 'distorted tetrahedral'),
     6: planar ? 'hexagonal planar' : (uniq.includes(180) && uniq[0] === 90 ? 'octahedral' : 'trigonal prismatic'),
     8: 'cubic',
